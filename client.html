@@ -1,0 +1,718 @@
+<script>
+  let currentSection = 'welcome';
+  let currentData = {};
+  let isLoading = false; // Anti-spam
+  
+  function showCalendar() {
+    if (isLoading) return;
+    
+    currentSection = 'calendar';
+    isLoading = true;
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>📅 Calendrier des Soirées</h2>
+        <div class="loading-container">
+          <img src="https://cataas.com/cat/gif/says/Loading...?filter=mono&fontColor=orange&fontSize=20&type=square" 
+               alt="Loading cat" class="loading-cat" />
+          <p>Chargement en cours...</p>
+        </div>
+      </div>
+    `;
+    
+    const startTime = Date.now();
+    google.script.run
+      .withSuccessHandler(events => {
+        const loadTime = Date.now() - startTime;
+        console.log(`Chargement événements: ${loadTime}ms`);
+        isLoading = false;
+        displayEvents(events);
+      })
+      .withFailureHandler(err => {
+        console.error('Erreur:', err);
+        isLoading = false;
+        document.getElementById('content').innerHTML = `
+          <div class="section active">
+            <h2>📅 Calendrier des Soirées</h2>
+            <p>❌ Erreur de chargement</p>
+            <button class="add-btn" onclick="showCalendar()">🔄 Réessayer</button>
+          </div>
+        `;
+      })
+      .getAllEvents();
+  }
+  
+  function displayEvents(events) {
+    if (!events || !Array.isArray(events)) {
+      events = [];
+    }
+    
+    currentData.events = events;
+    let eventsHtml = '';
+    
+    events.forEach(event => {
+      const votes = event.votes || {};
+      const yesVotes = votes.yes || 0;
+      const noVotes = votes.no || 0;
+      const maybeVotes = votes.maybe || 0;
+      
+      // Fix date J-1
+      let displayDate = 'Date non définie';
+      try {
+        if (event.date) {
+          if (typeof event.date === 'string' && event.date.match(/^\d{4}-\d{2}-\d{2}$/)) {
+            const dateParts = event.date.split('-');
+            const eventDate = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2]));
+            displayDate = eventDate.toLocaleDateString('fr-FR', {
+              weekday: 'long',
+              year: 'numeric', 
+              month: 'long',
+              day: 'numeric'
+            });
+          } else {
+            const eventDate = new Date(event.date);
+            if (!isNaN(eventDate.getTime())) {
+              displayDate = eventDate.toLocaleDateString('fr-FR', {
+                weekday: 'long',
+                year: 'numeric', 
+                month: 'long',
+                day: 'numeric'
+              });
+            } else {
+              displayDate = event.date;
+            }
+          }
+        }
+      } catch (e) {
+        displayDate = event.date;
+      }
+      
+      eventsHtml += `
+        <div class="vote-item">
+          <h3>${event.title}</h3>
+          <p>📅 ${displayDate} • Proposé par ${event.author}</p>
+          <p>${event.description}</p>
+          
+          <div class="vote-buttons">
+            <button class="vote-btn yes" onclick="vote('event', '${event.id}', 'yes')" data-event="${event.id}">
+              👍 Oui (${yesVotes})
+            </button>
+            <button class="vote-btn no" onclick="vote('event', '${event.id}', 'no')" data-event="${event.id}">
+              👎 Non (${noVotes})
+            </button>
+            <button class="vote-btn maybe" onclick="vote('event', '${event.id}', 'maybe')" data-event="${event.id}">
+              🤔 Peut-être (${maybeVotes})
+            </button>
+          </div>
+          
+          <div class="event-meta">
+            <button class="meta-btn participants-btn" onclick="toggleParticipants('${event.id}')">
+              👥 Participants (${yesVotes + noVotes + maybeVotes})
+            </button>
+            <button class="meta-btn delete-btn" onclick="deleteEvent('${event.id}')">
+              🗑️ Supprimer
+            </button>
+          </div>
+          
+          <!-- Zone participants cachée par défaut -->
+          <div id="participants-${event.id}" class="participants-zone" style="display: none;">
+            <div class="participants-loading">
+              <img src="https://cataas.com/cat/gif/says/Loading?filter=mono&fontColor=blue&fontSize=14&type=square" 
+                   alt="Loading participants" class="loading-cat-small" />
+              <p>Chargement des participants...</p>
+            </div>
+          </div>
+        </div>
+      `;
+    });
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>📅 Calendrier des Soirées</h2>
+        <p>Organise et vote pour les prochaines soirées !</p>
+        <button class="add-btn" onclick="addEvent()">+ Organiser une soirée</button>
+        <div id="events-list">
+          ${eventsHtml || '<p>Aucun événement pour le moment. Organise la première soirée !</p>'}
+        </div>
+      </div>
+    `;
+  }
+  
+  function toggleParticipants(eventId) {
+    const zone = document.getElementById('participants-' + eventId);
+    const btn = document.querySelector(`[onclick="toggleParticipants('${eventId}')"]`);
+    
+    if (!zone) return;
+    
+    if (zone.style.display === 'none') {
+      // Ouvrir et charger
+      zone.style.display = 'block';
+      btn.textContent = '👆 Masquer participants';
+      loadParticipants(eventId);
+    } else {
+      // Fermer
+      zone.style.display = 'none';
+      const event = currentData.events.find(e => e.id === eventId);
+      if (event) {
+        const votes = event.votes || {};
+        const total = (votes.yes || 0) + (votes.no || 0) + (votes.maybe || 0);
+        btn.textContent = `👥 Participants (${total})`;
+      }
+    }
+  } 
+  function loadParticipants(eventId) {
+    google.script.run
+      .withSuccessHandler(participants => {
+        displayParticipantsInZone(eventId, participants);
+      })
+      .withFailureHandler(err => {
+        console.error('❌ Erreur loadParticipants:', err);
+        const zone = document.getElementById('participants-' + eventId);
+        if (zone) {
+          zone.innerHTML = `<p class="error">❌ Erreur chargement participants</p>`;
+        }
+      })
+      .getEventParticipants(eventId);
+  }
+
+  function displayParticipantsInZone(eventId, participants) {
+    const zone = document.getElementById('participants-' + eventId);
+    if (!zone) {
+      return;
+    }
+    
+    // Protection
+    if (!participants || !Array.isArray(participants)) {
+      participants = [];
+    }
+    
+    const event = currentData.events.find(e => e.id === eventId);
+    if (!event) {
+      return;
+    }
+    
+    const yesParticipants = participants.filter(p => p && p.vote === 'yes');
+    const noParticipants = participants.filter(p => p && p.vote === 'no');
+    const maybeParticipants = participants.filter(p => p && p.vote === 'maybe');
+    
+    let participantsHtml = `
+      <div class="participants-content">
+        <div class="participants-group">
+          <h5>✅ Participants confirmés (${yesParticipants.length})</h5>
+          ${yesParticipants.map(p => `<div class="participant yes">${p.email}</div>`).join('') || '<p>Aucun participant confirmé</p>'}
+        </div>
+        
+        <div class="participants-group">
+          <h5>🤔 Peut-être (${maybeParticipants.length})</h5>
+          ${maybeParticipants.map(p => `<div class="participant maybe">${p.email}</div>`).join('') || '<p>Aucun "peut-être"</p>'}
+        </div>
+        
+        <div class="participants-group">
+          <h5>❌ Ne viennent pas (${noParticipants.length})</h5>
+          ${noParticipants.map(p => `<div class="participant no">${p.email}</div>`).join('') || '<p>Personne n\'a dit non</p>'}
+        </div>
+      </div>
+    `;
+    
+    zone.innerHTML = participantsHtml;
+  }
+  
+  function vote(itemType, itemId, voteType) {
+    if (isLoading) return;
+    
+    const button = event.target;
+    const originalText = button.textContent;
+    
+    const eventButtons = document.querySelectorAll(`[data-event="${itemId}"]`);
+    eventButtons.forEach(btn => btn.disabled = true);
+    
+    button.textContent = '⏳';
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        button.textContent = '✅';
+        isLoading = false;
+        setTimeout(() => {
+          switch(currentSection) {
+            case 'calendar': showCalendar(); break;
+            case 'bars': showBars(); break;
+            case 'karaoke': showKaraoke(); break;
+            case 'activities': showActivities(); break;
+          }
+        }, 500);
+      })
+      .withFailureHandler(err => {
+        button.textContent = '❌';
+        isLoading = false;
+        eventButtons.forEach(btn => btn.disabled = false);
+        setTimeout(() => {
+          button.textContent = originalText;
+        }, 2000);
+        alert('Erreur lors du vote: ' + err);
+      })
+      .recordVote(itemType, itemId, voteType);
+  }
+  
+  function deleteEvent(eventId) {
+    if (isLoading) return;
+    
+    if (!confirm('Êtes-vous sûr de vouloir supprimer cet événement ?')) {
+      return;
+    }
+    
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(response => {
+        isLoading = false;
+        if (response.success) {
+          alert('Événement supprimé avec succès !');
+          showCalendar();
+        }
+      })
+      .withFailureHandler(err => {
+        isLoading = false;
+        alert('Erreur suppression: ' + err);
+      })
+      .deleteEvent(eventId);
+  }
+  
+  // ... garder toutes les autres fonctions (showBars, showKaraoke, etc.) identiques
+  
+  function showBars() {
+    if (isLoading) return;
+    
+    currentSection = 'bars';
+    isLoading = true;
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🍻 Meilleurs Bars</h2>
+        <div class="loading-container">
+          <img src="https://cataas.com/cat/gif/says/Bars?filter=mono&fontColor=yellow&fontSize=20&type=square" 
+               alt="Loading bars" class="loading-cat" />
+          <p>Chargement en cours...</p>
+        </div>
+      </div>
+    `;
+    
+    const startTime = Date.now();
+    google.script.run
+      .withSuccessHandler(bars => {
+        const loadTime = Date.now() - startTime;
+        console.log(`Chargement bars: ${loadTime}ms`);
+        isLoading = false;
+        displayBars(bars);
+      })
+      .withFailureHandler(err => {
+        console.error('Erreur:', err);
+        isLoading = false;
+        document.getElementById('content').innerHTML = `
+          <div class="section active">
+            <h2>🍻 Meilleurs Bars</h2>
+            <p>❌ Erreur de chargement</p>
+            <button class="add-btn" onclick="showBars()">🔄 Réessayer</button>
+          </div>
+        `;
+      })
+      .getAllBars();
+  }
+  
+  function displayBars(bars) {
+    if (!bars || !Array.isArray(bars)) {
+      bars = [];
+    }
+    
+    currentData.bars = bars;
+    let barsHtml = '';
+    
+    bars.forEach(bar => {
+      const votes = bar.votes || {};
+      const upVotes = votes.up || 0;
+      const downVotes = votes.down || 0;
+      
+      barsHtml += `
+        <div class="vote-item">
+          <h3>${bar.name}</h3>
+          <p>📍 ${bar.location}</p>
+          <p>${bar.description}</p>
+          <div class="vote-buttons">
+            <button class="vote-btn" onclick="vote('bar', '${bar.id}', 'up')">👍 (${upVotes})</button>
+            <button class="vote-btn" onclick="vote('bar', '${bar.id}', 'down')">👎 (${downVotes})</button>
+          </div>
+        </div>
+      `;
+    });
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🍻 Meilleurs Bars</h2>
+        <p>Découvre et vote pour les meilleurs bars de la ville !</p>
+        <button class="add-btn" onclick="addBar()">+ Ajouter un bar</button>
+        <div id="bars-list">
+          ${barsHtml || '<p>Aucun bar ajouté. Sois le premier à recommander un spot !</p>'}
+        </div>
+      </div>
+    `;
+  }
+  
+  function showKaraoke() {
+    if (isLoading) return;
+    
+    currentSection = 'karaoke';
+    isLoading = true;
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🎤 Meilleurs Karaoké</h2>
+        <div class="loading-container">
+          <img src="https://cataas.com/cat/gif/says/Karaoke?filter=mono&fontColor=pink&fontSize=18&type=square" 
+               alt="Loading karaoke" class="loading-cat" />
+          <p>Chargement en cours...</p>
+        </div>
+      </div>
+    `;
+    
+    const startTime = Date.now();
+    google.script.run
+      .withSuccessHandler(karaokes => {
+        const loadTime = Date.now() - startTime;
+        console.log(`Chargement karaokés: ${loadTime}ms`);
+        isLoading = false;
+        displayKaraoke(karaokes);
+      })
+      .withFailureHandler(err => {
+        console.error('Erreur:', err);
+        isLoading = false;
+        document.getElementById('content').innerHTML = `
+          <div class="section active">
+            <h2>🎤 Meilleurs Karaoké</h2>
+            <p>❌ Erreur de chargement</p>
+            <button class="add-btn" onclick="showKaraoke()">🔄 Réessayer</button>
+          </div>
+        `;
+      })
+      .getAllKaraoke();
+  }
+  
+  function displayKaraoke(karaokes) {
+    if (!karaokes || !Array.isArray(karaokes)) {
+      karaokes = [];
+    }
+    
+    currentData.karaokes = karaokes;
+    let karaokeHtml = '';
+    
+    karaokes.forEach(karaoke => {
+      const votes = karaoke.votes || {};
+      const upVotes = votes.up || 0;
+      const downVotes = votes.down || 0;
+      
+      karaokeHtml += `
+        <div class="vote-item">
+          <h3>${karaoke.name}</h3>
+          <p>📍 ${karaoke.location}</p>
+          <p>${karaoke.description}</p>
+          <div class="vote-buttons">
+            <button class="vote-btn" onclick="vote('karaoke', '${karaoke.id}', 'up')">👍 (${upVotes})</button>
+            <button class="vote-btn" onclick="vote('karaoke', '${karaoke.id}', 'down')">👎 (${downVotes})</button>
+          </div>
+        </div>
+      `;
+    });
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🎤 Meilleurs Karaoké</h2>
+        <p>Les spots karaoké les plus hot de la ville ! 🔥</p>
+        <button class="add-btn" onclick="addKaraoke()">+ Ajouter un karaoké</button>
+        <div id="karaoke-list">
+          ${karaokeHtml || '<p>Aucun karaoké ajouté. Partage tes spots préférés !</p>'}
+        </div>
+      </div>
+    `;
+  }
+  
+  function showActivities() {
+    if (isLoading) return;
+    
+    currentSection = 'activities';
+    isLoading = true;
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🎯 Activités Afterwork</h2>
+        <div class="loading-container">
+          <img src="https://cataas.com/cat/gif/says/Activities?filter=mono&fontColor=green&fontSize=16&type=square" 
+               alt="Loading activities" class="loading-cat" />
+          <p>Chargement en cours...</p>
+        </div>
+      </div>
+    `;
+    
+    const startTime = Date.now();
+    google.script.run
+      .withSuccessHandler(activities => {
+        const loadTime = Date.now() - startTime;
+        console.log(`Chargement activités: ${loadTime}ms`);
+        isLoading = false;
+        displayActivities(activities);
+      })
+      .withFailureHandler(err => {
+        console.error('Erreur:', err);
+        isLoading = false;
+        document.getElementById('content').innerHTML = `
+          <div class="section active">
+            <h2>🎯 Activités Afterwork</h2>
+            <p>❌ Erreur de chargement</p>
+            <button class="add-btn" onclick="showActivities()">🔄 Réessayer</button>
+          </div>
+        `;
+      })
+      .getAllActivities();
+  }
+  
+  function displayActivities(activities) {
+    if (!activities || !Array.isArray(activities)) {
+      activities = [];
+    }
+    
+    currentData.activities = activities;
+    let activitiesHtml = '';
+    
+    activities.forEach(activity => {
+      const votes = activity.votes || {};
+      const upVotes = votes.up || 0;
+      const downVotes = votes.down || 0;
+      
+      activitiesHtml += `
+        <div class="vote-item">
+          <h3>${activity.name}</h3>
+          <p>📍 ${activity.location} • ⏱️ ${activity.duration} • 👥 ${activity.maxPlayers} joueurs max</p>
+          <div class="vote-buttons">
+            <button class="vote-btn" onclick="vote('activity', '${activity.id}', 'up')">👍 (${upVotes})</button>
+            <button class="vote-btn" onclick="vote('activity', '${activity.id}', 'down')">👎 (${downVotes})</button>
+          </div>
+        </div>
+      `;
+    });
+    
+    document.getElementById('content').innerHTML = `
+      <div class="section active">
+        <h2>🎯 Activités Afterwork</h2>
+        <p>Prison break, escape games et toutes les activités fun !</p>
+        <button class="add-btn" onclick="addActivity()">+ Ajouter une activité</button>
+        <div id="activities-list">
+          ${activitiesHtml || '<p>Aucune activité ajoutée. Propose tes activités favorites !</p>'}
+        </div>
+      </div>
+    `;
+  }
+  
+  function addEvent() {
+    if (isLoading) return;
+    
+    const eventForm = `
+      <div class="form-container">
+        <h3>Organiser une nouvelle soirée</h3>
+        <input type="text" id="eventTitle" placeholder="Titre de la soirée" required />
+        <input type="date" id="eventDate" required />
+        <textarea id="eventDesc" placeholder="Description de la soirée..." rows="4"></textarea>
+        <div class="form-buttons">
+          <button class="add-btn" onclick="saveEvent()">Créer l'événement</button>
+          <button class="cancel-btn" onclick="showCalendar()">Annuler</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('content').innerHTML = eventForm;
+  }
+  
+  function saveEvent() {
+    const title = document.getElementById('eventTitle').value;
+    const date = document.getElementById('eventDate').value;
+    const desc = document.getElementById('eventDesc').value;
+    
+    if (!title || !date) {
+      alert('Veuillez remplir au moins le titre et la date');
+      return;
+    }
+    
+    if (isLoading) return;
+    
+    const saveBtn = document.querySelector('.add-btn');
+    saveBtn.textContent = '⏳ Création...';
+    saveBtn.disabled = true;
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        isLoading = false;
+        alert('Événement créé avec succès !');
+        showCalendar();
+      })
+      .withFailureHandler(err => {
+        isLoading = false;
+        alert('Erreur: ' + err);
+        saveBtn.textContent = 'Créer l\'événement';
+        saveBtn.disabled = false;
+      })
+      .createEvent(title, date, desc);
+  }
+  
+  function addBar() {
+    if (isLoading) return;
+    
+    const barForm = `
+      <div class="form-container">
+        <h3>Ajouter un nouveau bar</h3>
+        <input type="text" id="barName" placeholder="Nom du bar" required />
+        <input type="text" id="barLocation" placeholder="Adresse/Quartier" required />
+        <textarea id="barDesc" placeholder="Description, ambiance, spécialités..." rows="4"></textarea>
+        <div class="form-buttons">
+          <button class="add-btn" onclick="saveBar()">Ajouter le bar</button>
+          <button class="cancel-btn" onclick="showBars()">Annuler</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('content').innerHTML = barForm;
+  }
+  
+  function saveBar() {
+    const name = document.getElementById('barName').value;
+    const location = document.getElementById('barLocation').value;
+    const desc = document.getElementById('barDesc').value;
+    
+    if (!name || !location) {
+      alert('Veuillez remplir au moins le nom et l\'adresse');
+      return;
+    }
+    
+    if (isLoading) return;
+    
+    const saveBtn = document.querySelector('.add-btn');
+    saveBtn.textContent = '⏳ Ajout...';
+    saveBtn.disabled = true;
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        isLoading = false;
+        alert('Bar ajouté avec succès !');
+        showBars();
+      })
+      .withFailureHandler(err => {
+        isLoading = false;
+        alert('Erreur: ' + err);
+        saveBtn.textContent = 'Ajouter le bar';
+        saveBtn.disabled = false;
+      })
+      .addBar(name, location, desc);
+  }
+  
+  function addKaraoke() {
+    if (isLoading) return;
+    
+    const karaokeForm = `
+      <div class="form-container">
+        <h3>Ajouter un nouveau karaoké</h3>
+        <input type="text" id="karaokeName" placeholder="Nom du karaoké" required />
+        <input type="text" id="karaokeLocation" placeholder="Adresse/Quartier" required />
+        <textarea id="karaokeDesc" placeholder="Type de salle, équipements, ambiance..." rows="4"></textarea>
+        <div class="form-buttons">
+          <button class="add-btn" onclick="saveKaraoke()">Ajouter le karaoké</button>
+          <button class="cancel-btn" onclick="showKaraoke()">Annuler</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('content').innerHTML = karaokeForm;
+  }
+  
+  function saveKaraoke() {
+    const name = document.getElementById('karaokeName').value;
+    const location = document.getElementById('karaokeLocation').value;
+    const desc = document.getElementById('karaokeDesc').value;
+    
+    if (!name || !location) {
+      alert('Veuillez remplir au moins le nom et l\'adresse');
+      return;
+    }
+    
+    if (isLoading) return;
+    
+    const saveBtn = document.querySelector('.add-btn');
+    saveBtn.textContent = '⏳ Ajout...';
+    saveBtn.disabled = true;
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        isLoading = false;
+        alert('Karaoké ajouté avec succès !');
+        showKaraoke();
+      })
+      .withFailureHandler(err => {
+        isLoading = false;
+        alert('Erreur: ' + err);
+        saveBtn.textContent = 'Ajouter le karaoké';
+        saveBtn.disabled = false;
+      })
+      .addKaraoke(name, location, desc);
+  }
+  
+  function addActivity() {
+    if (isLoading) return;
+    
+    const activityForm = `
+      <div class="form-container">
+        <h3>Ajouter une nouvelle activité</h3>
+        <input type="text" id="activityName" placeholder="Nom de l'activité" required />
+        <input type="text" id="activityLocation" placeholder="Adresse/Quartier" required />
+        <input type="text" id="activityDuration" placeholder="Durée (ex: 60 min)" />
+        <input type="number" id="activityMaxPlayers" placeholder="Nombre max de joueurs" min="1" />
+        <div class="form-buttons">
+          <button class="add-btn" onclick="saveActivity()">Ajouter l'activité</button>
+          <button class="cancel-btn" onclick="showActivities()">Annuler</button>
+        </div>
+      </div>
+    `;
+    document.getElementById('content').innerHTML = activityForm;
+  }
+  
+  function saveActivity() {
+    const name = document.getElementById('activityName').value;
+    const location = document.getElementById('activityLocation').value;
+    const duration = document.getElementById('activityDuration').value || 'Non spécifié';
+    const maxPlayers = document.getElementById('activityMaxPlayers').value || 'Illimité';
+    
+    if (!name || !location) {
+      alert('Veuillez remplir au moins le nom et l\'adresse');
+      return;
+    }
+    
+    if (isLoading) return;
+    
+    const saveBtn = document.querySelector('.add-btn');
+    saveBtn.textContent = '⏳ Ajout...';
+    saveBtn.disabled = true;
+    isLoading = true;
+    
+    google.script.run
+      .withSuccessHandler(() => {
+        isLoading = false;
+        alert('Activité ajoutée avec succès !');
+        showActivities();
+      })
+      .withFailureHandler(err => {
+        isLoading = false;
+        alert('Erreur: ' + err);
+        saveBtn.textContent = 'Ajouter l\'activité';
+        saveBtn.disabled = false;
+      })
+      .addActivity(name, location, duration, maxPlayers);
+  }
+  
+  document.addEventListener('DOMContentLoaded', function() {
+    console.log('Event Organizer App initialized with cats! 🐱');
+  });
+  </script>
